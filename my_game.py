@@ -33,7 +33,8 @@ while not window_should_close():
     begin_drawing()
     clear_background(SKYBLUE)
     begin_mode_3d(camera)
-    draw_plane(Vector3(0, 0, 0), Vector2(MAP_SIZE*2+10 , MAP_SIZE*2+10), DARKGREEN)
+    draw_cube(Vector3(0, -5, 0), MAP_SIZE*2+10, 10, MAP_SIZE*2+10, DARKGREEN)
+    draw_cube(Vector3(0, -51, 0), MAP_SIZE*2+10, 82, MAP_SIZE*2+10, BROWN)
     draw_grid(MAP_SIZE*2 +10, 1)
     for bx, bz in boxes:
         draw_cube(Vector3(bx, BOX_SIZE/2, bz),
