@@ -42,6 +42,9 @@ while not window_should_close():
         
         
     end_mode_3d()
+
+    draw_text("+", 444, 290, 20, WHITE)
+
     end_drawing()
 
 close_window()
