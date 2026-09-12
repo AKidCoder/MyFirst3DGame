@@ -3,11 +3,12 @@ import random
 from pyray import *
 
 # --- Game & Player Constants ---
-EYE_HEIGHT = 2.0
+NORMAL_EYE_HEIGHT = 2.0
+CROUCH_EYE_HEIGHT = 1.0
 BOX_SIZE = 4.0
 PLAYER_R = 0.4
 EXIT_RADIUS = 1.2
-FLASHLIGHT_RANGE = 14.0 
+MAX_FLASHLIGHT_RANGE = 14.0 
 
 # --- Monster Stats ---
 STALKER_SPEED = 2.4
@@ -23,6 +24,9 @@ LINE_COLOR = BLACK
 FLOOR_COLOR = DARKBROWN   
 CEIL_COLOR = Color(20, 15, 10, 255)
 LOCKER_COLOR = Color(40, 45, 50, 255)
+
+# Add this missing color right here!
+CYAN = Color(0, 255, 255, 255)
 
 # --- Initialization ---
 init_window(1500, 1000, "3D Maze - The Backrooms")
@@ -53,14 +57,13 @@ def create_footstep_sound():
 step_sound = create_footstep_sound()
 
 # --- Map Blueprint ---
-# '1'=Wall, '0'=Path, 'P'=Spawn, 'E'=Exit, 'S'=Stalker, 'D'=Dasher, 'K'=Key, 'L'=Locker
 LEVEL_MAP = [
     "1111111111111111111",
-    "10110010000010010E1",   
-    "101110101110101S011",
-    "1L10000100001111001", 
-    "1010111110101000D01",
-    "110000P0001000100K1",   
+    "11110010000010010E1",   
+    "111110101110101S011",
+    "1110000100001111001", 
+    "11101111L0101000D01",
+    "110000P0001000100L1",   
     "1111111111111111111"
 ]
 
@@ -68,6 +71,7 @@ LEVEL_MAP = [
 boxes = []
 grid_tiles = []
 lockers = []
+possible_spots = [] 
 rows = len(LEVEL_MAP)
 cols = len(LEVEL_MAP[0])
 
@@ -75,7 +79,6 @@ spawn_x, spawn_z = 0.0, 0.0
 exit_x, exit_z = 0.0, 0.0
 stalker_x, stalker_z = 0.0, 0.0
 dasher_x, dasher_z = 0.0, 0.0
-key_x, key_z = 0.0, 0.0
 
 for row in range(rows):
     for col in range(cols):
@@ -95,14 +98,19 @@ for row in range(rows):
             stalker_x, stalker_z = wx, wz
         elif tile == "D":
             dasher_x, dasher_z = wx, wz
-        elif tile == "K":
-            key_x, key_z = wx, wz
         elif tile == "L":
             lockers.append((wx, wz))
+        elif tile == "0":
+            possible_spots.append((wx, wz))
+
+# Randomly spawn 3 Fuses and 2 Batteries
+random.shuffle(possible_spots)
+fuses = possible_spots[:3]
+batteries = possible_spots[3:5]
 
 camera = Camera3D(
-    Vector3(spawn_x, EYE_HEIGHT, spawn_z),
-    Vector3(spawn_x, EYE_HEIGHT, spawn_z - 1.0),
+    Vector3(spawn_x, NORMAL_EYE_HEIGHT, spawn_z),
+    Vector3(spawn_x, NORMAL_EYE_HEIGHT, spawn_z - 1.0),
     Vector3(0, 1, 0),
     60.0,
     CAMERA_PERSPECTIVE
@@ -116,16 +124,20 @@ elapsed = 0.0
 
 bob_timer = 0.0
 step_timer = 0.0
+
+# Survival Stats
 stamina = 100.0
+battery_power = 100.0
+TOTAL_FUSES = 3
+fuses_collected = 0
 
 dasher_state_timer = 0.0
 dasher_is_rushing = False
 
-has_key = False
 show_locked_msg_timer = 0.0
 
 is_hiding = False
-pre_hide_x, pre_hide_z = 0.0, 0.0 # Remembers where you stood before hiding
+pre_hide_x, pre_hide_z = 0.0, 0.0 
 
 # --- Helpers ---
 def hits_box(px, pz, radius):
@@ -143,7 +155,6 @@ while not window_should_close():
     old_x = camera.position.x 
     old_z = camera.position.z
 
-    # Distances to monsters
     s_dir_x = camera.position.x - stalker_x
     s_dir_z = camera.position.z - stalker_z
     s_dist = math.hypot(s_dir_x, s_dir_z)
@@ -154,6 +165,18 @@ while not window_should_close():
 
     if not game_won and not game_over:
         
+        # Flashlight Battery Drain
+        if not is_hiding:
+            battery_power -= 1.0 * dt
+            if battery_power < 0: battery_power = 0.0
+
+        # Current vision shrinks as battery dies (minimum 4 blocks visibility)
+        current_vision = max(4.0, MAX_FLASHLIGHT_RANGE * (battery_power / 100.0))
+        
+        # Flicker effect when battery is low (< 25%)
+        if battery_power < 25.0 and random.random() < 0.08:
+            current_vision = 0.0 # Pitch black for a split second!
+
         # --- Locker Interaction Logic ---
         near_locker = None
         for lx, lz in lockers:
@@ -163,38 +186,47 @@ while not window_should_close():
 
         if is_key_pressed(KEY_E):
             if is_hiding:
-                # Safely step out of the locker to your original spot
                 is_hiding = False
                 camera.position.x = pre_hide_x
                 camera.position.z = pre_hide_z
             elif near_locker is not None:
-                # Save position and snap into the locker
                 is_hiding = True
                 pre_hide_x = camera.position.x
                 pre_hide_z = camera.position.z
                 camera.position.x = near_locker[0]
                 camera.position.z = near_locker[1]
 
-        # --- Normal Player Logic (Only runs if NOT hiding) ---
+        # --- Normal Player Logic ---
         if not is_hiding:
             update_camera(camera, CAMERA_FIRST_PERSON)
             
-            # Sprint & Stamina logic
             moved_x = camera.position.x - old_x
             moved_z = camera.position.z - old_z
             moved_dist = math.hypot(moved_x, moved_z)
             is_moving = moved_dist > 0.001
 
-            if is_key_down(KEY_LEFT_SHIFT) and stamina > 0 and is_moving:
+            # Movement Modifiers (Sprint vs Crouch)
+            speed_mult = 1.0
+            target_eye_height = NORMAL_EYE_HEIGHT
+            
+            if is_key_down(KEY_LEFT_CONTROL):
+                # CROUCHING
+                speed_mult = 0.4
+                target_eye_height = CROUCH_EYE_HEIGHT
+                stamina = min(100.0, stamina + 20.0 * dt) # Regain stamina faster while crouching
+            elif is_key_down(KEY_LEFT_SHIFT) and stamina > 0 and is_moving:
+                # SPRINTING
+                speed_mult = 1.4
                 stamina -= 35.0 * dt
-                boost = 1.2
-                camera.position.x += moved_x * boost
-                camera.position.z += moved_z * boost
-                camera.target.x += moved_x * boost
-                camera.target.z += moved_z * boost
-                bob_timer += dt * 8.0 # Run faster = bob faster
             else:
+                # WALKING
                 stamina = min(100.0, stamina + 15.0 * dt)
+
+            # Apply movement multiplier
+            camera.position.x += moved_x * (speed_mult - 1.0)
+            camera.position.z += moved_z * (speed_mult - 1.0)
+            camera.target.x += moved_x * (speed_mult - 1.0)
+            camera.target.z += moved_z * (speed_mult - 1.0)
 
             # Player Wall Collision
             px, pz = camera.position.x, camera.position.z
@@ -206,38 +238,46 @@ while not window_should_close():
                 camera.target.x += dx        
                 camera.target.z += dz
 
-            # Head bobbing & footsteps
+            # Head bobbing & Camera Height smoothing
             if is_moving:
-                bob_timer += dt * 10.0
-                step_timer += dt
+                bob_timer += dt * 10.0 * speed_mult
+                step_timer += dt * speed_mult
                 
-                bob_offset = math.sin(bob_timer) * 0.12
-                camera.position.y = EYE_HEIGHT + bob_offset
-                camera.target.y = EYE_HEIGHT + bob_offset
+                bob_offset = math.sin(bob_timer) * 0.12 * speed_mult
+                camera.position.y += (target_eye_height + bob_offset - camera.position.y) * 10.0 * dt
+                camera.target.y = camera.position.y
 
-                if step_timer >= (0.25 if is_key_down(KEY_LEFT_SHIFT) else 0.35):
-                    play_sound(step_sound)
+                # Play footstep sound (quiet if crouching)
+                if step_timer >= 0.35:
+                    if not is_key_down(KEY_LEFT_CONTROL): # Silent if crouching
+                        play_sound(step_sound)
                     step_timer = 0.0
             else:
-                camera.position.y += (EYE_HEIGHT - camera.position.y) * 8.0 * dt
+                camera.position.y += (target_eye_height - camera.position.y) * 10.0 * dt
                 camera.target.y = camera.position.y
                 step_timer = 0.3
 
-            # Objective: Pick up Key
-            if not has_key:
-                dist_to_key = math.hypot(camera.position.x - key_x, camera.position.z - key_z)
-                if dist_to_key < 1.4:
-                    has_key = True
+            # Objective: Pick up Fuses
+            for f in fuses[:]:
+                if math.hypot(camera.position.x - f[0], camera.position.z - f[1]) < 1.4:
+                    fuses.remove(f)
+                    fuses_collected += 1
 
-            # Objective: Exit Door Check
+            # Objective: Pick up Batteries
+            for b in batteries[:]:
+                if math.hypot(camera.position.x - b[0], camera.position.z - b[1]) < 1.4:
+                    batteries.remove(b)
+                    battery_power = min(100.0, battery_power + 40.0)
+
+            # Exit Door Check
             dist_to_exit = math.hypot(camera.position.x - exit_x, camera.position.z - exit_z)
             if dist_to_exit < EXIT_RADIUS:
-                if has_key:
+                if fuses_collected >= TOTAL_FUSES:
                     game_won = True
                 else:
                     show_locked_msg_timer = 1.5
 
-            # --- Monster AI (Paused while hiding) ---
+            # --- Monster AI ---
             # Stalker AI
             if s_dist > 0:
                 step_x = (s_dir_x / s_dist) * STALKER_SPEED * dt
@@ -278,11 +318,10 @@ while not window_should_close():
                 game_over = True
                 death_cause = "THE DASHER TORE YOU APART"
 
-        # Even if hiding, we still need camera forward vectors to know which way you are looking
         else: 
-            # Allows you to look around while inside the locker using standard pyray camera movement
+            # Hiding in Locker
             update_camera(camera, CAMERA_FIRST_PERSON)
-            camera.position.x = near_locker[0] # Pin position strictly to locker
+            camera.position.x = near_locker[0] 
             camera.position.z = near_locker[1]
 
     # Camera math for Threat Arrows
@@ -301,62 +340,64 @@ while not window_should_close():
     
     begin_mode_3d(camera)
     
-    # Floor and Ceiling (Distance Culled)
+    # Render environment based on current_vision (Battery level)
     for tx, tz in grid_tiles:
-        if math.hypot(camera.position.x - tx, camera.position.z - tz) < FLASHLIGHT_RANGE:
+        if math.hypot(camera.position.x - tx, camera.position.z - tz) < current_vision:
             draw_cube(Vector3(tx, -0.5, tz), BOX_SIZE, 1.0, BOX_SIZE, FLOOR_COLOR)
             draw_cube(Vector3(tx, 4.5, tz), BOX_SIZE, 1.0, BOX_SIZE, CEIL_COLOR)
 
-    # Walls (Distance Culled)
     for bx, bz in boxes:
-        if math.hypot(camera.position.x - bx, camera.position.z - bz) < FLASHLIGHT_RANGE:
+        if math.hypot(camera.position.x - bx, camera.position.z - bz) < current_vision:
             draw_cube(Vector3(bx, BOX_SIZE / 2.0, bz), BOX_SIZE, BOX_SIZE, BOX_SIZE, WALL_COLOR)
             draw_cube_wires(Vector3(bx, BOX_SIZE / 2.0, bz), BOX_SIZE, BOX_SIZE, BOX_SIZE, LINE_COLOR)
 
-    # Lockers
     for lx, lz in lockers:
-        if math.hypot(camera.position.x - lx, camera.position.z - lz) < FLASHLIGHT_RANGE:
+        if math.hypot(camera.position.x - lx, camera.position.z - lz) < current_vision:
             draw_cube(Vector3(lx, 1.8, lz), 1.6, 3.6, 1.6, LOCKER_COLOR)
             draw_cube_wires(Vector3(lx, 1.8, lz), 1.6, 3.6, 1.6, BLACK)
 
-    # Floating Golden Key
-    if not has_key and math.hypot(camera.position.x - key_x, camera.position.z - key_z) < FLASHLIGHT_RANGE:
-        key_hover = 1.0 + math.sin(elapsed * 4.0) * 0.2
-        draw_cube(Vector3(key_x, key_hover, key_z), 0.4, 0.4, 0.8, GOLD)
-        draw_sphere(Vector3(key_x, key_hover, key_z + 0.4), 0.3, YELLOW)
+    # Render Fuses (Glowing Blue)
+    for fx, fz in fuses:
+        if math.hypot(camera.position.x - fx, camera.position.z - fz) < current_vision:
+            hover = 1.0 + math.sin(elapsed * 5.0) * 0.2
+            draw_cube(Vector3(fx, hover, fz), 0.3, 0.6, 0.3, CYAN)
+            draw_cube_wires(Vector3(fx, hover, fz), 0.3, 0.6, 0.3, BLUE)
+
+    # Render Batteries (Glowing Green)
+    for bx, bz in batteries:
+        if math.hypot(camera.position.x - bx, camera.position.z - bz) < current_vision:
+            draw_cylinder(Vector3(bx, 0.2, bz), 0.2, 0.2, 0.6, 8, LIME)
+            draw_cylinder_wires(Vector3(bx, 0.2, bz), 0.2, 0.2, 0.6, 8, GREEN)
       
-    # Stalker Mesh
-    if s_dist < FLASHLIGHT_RANGE:
+    # Monsters
+    if s_dist < current_vision:
         s_glitch = (15.0 - s_dist) * 0.05 if s_dist < 15.0 else 0.0
         gx = random.uniform(-s_glitch, s_glitch)
         gz = random.uniform(-s_glitch, s_glitch)
         draw_cylinder(Vector3(stalker_x + gx, 0.0, stalker_z + gz), STALKER_R, STALKER_R, 3.5, 8, BLACK)
         draw_sphere(Vector3(stalker_x + gx, 3.5, stalker_z + gz), 0.5, BLACK)
 
-    # Dasher Mesh
-    if d_dist < FLASHLIGHT_RANGE:
+    if d_dist < current_vision:
         d_color = RED if dasher_is_rushing else MAROON
         d_height = 2.2 + (math.sin(elapsed * 18.0) * 0.4 if dasher_is_rushing else 0.0)
         draw_cylinder(Vector3(dasher_x, 0.0, dasher_z), DASHER_R, 0.1, d_height, 6, d_color)
         draw_sphere(Vector3(dasher_x, d_height + 0.3, dasher_z), 0.3, ORANGE if dasher_is_rushing else RED)
         
-    # Exit Portal (Green if unlocked, Red if locked)
-    exit_color = GREEN if has_key else MAROON
-    wire_color = LIME if has_key else RED
+    # Exit Portal
+    is_unlocked = (fuses_collected >= TOTAL_FUSES)
+    exit_color = GREEN if is_unlocked else MAROON
+    wire_color = LIME if is_unlocked else RED
     draw_cube(Vector3(exit_x, 2.0, exit_z), 2.0, 4.0, 2.0, exit_color)
     draw_cube_wires(Vector3(exit_x, 2.0, exit_z), 2.0, 4.0, 2.0, wire_color)
     
     end_mode_3d()
 
     # --- RENDER 2D SCREEN OVERLAYS ---
-
-    # Dasher Blood Screen Effect (Only triggers if you are exposed)
     if not is_hiding and dasher_is_rushing and d_dist < 20.0 and not game_over and not game_won:
         blood_pulse = (math.sin(elapsed * 20.0) + 1.0) / 2.0
         blood_alpha = int((1.0 - (d_dist / 20.0)) * 120 * blood_pulse + 40)
         draw_rectangle(0, 0, 1500, 1000, Color(200, 0, 0, blood_alpha))
 
-    # Hiding Locker Mask Overlay
     if is_hiding:
         draw_rectangle(0, 0, 1500, 260, Color(0, 0, 0, 230))
         draw_rectangle(0, 740, 1500, 260, Color(0, 0, 0, 230))
@@ -364,38 +405,41 @@ while not window_should_close():
         draw_rectangle(1200, 260, 300, 480, Color(0, 0, 0, 230))
         draw_text("[E] EXIT LOCKER", 630, 800, 28, LIGHTGRAY)
     else:
-        draw_text("+", 744, 490, 20, DARKGRAY) # Crosshair
+        draw_text("+", 744, 490, 20, DARKGRAY) 
+        if is_key_down(KEY_LEFT_CONTROL):
+            draw_text("CROUCHING", 700, 520, 18, GRAY)
 
-    # Locker Enter Prompt
     if near_locker is not None and not is_hiding:
         draw_text("[E] HIDE IN LOCKER", 610, 560, 26, YELLOW)
 
-    # Locked Door Warning
     if show_locked_msg_timer > 0.0:
         show_locked_msg_timer -= dt
-        draw_text("DOOR IS LOCKED - FIND THE KEY!", 480, 400, 32, RED)
+        draw_text(f"DOOR LOCKED - FIND {TOTAL_FUSES - fuses_collected} MORE FUSES!", 420, 400, 32, RED)
 
-    # Stamina Bar
+    # UI: Stamina Bar
     draw_rectangle(20, 950, int(stamina * 3), 20, Color(200, 200, 200, 180))
     draw_rectangle_lines(20, 950, 300, 20, DARKGRAY)
     draw_text("STAMINA", 20, 925, 20, LIGHTGRAY)
 
-    # Key Status Objective Text
-    if has_key:
-        draw_text("OBJECTIVE: ESCAPE (KEY COLLECTED)", 30, 30, 24, GOLD)
-    else:
-        draw_text("OBJECTIVE: FIND THE KEY", 30, 30, 24, WHITE)
+    # UI: Battery Bar
+    bat_color = LIME if battery_power > 30 else RED
+    draw_rectangle(20, 880, int(battery_power * 3), 20, bat_color)
+    draw_rectangle_lines(20, 880, 300, 20, DARKGRAY)
+    draw_text("FLASHLIGHT BATTERY", 20, 855, 20, LIGHTGRAY)
 
-    # Threat Arrow Indicators
+    # UI: Fuse Objective
+    if fuses_collected >= TOTAL_FUSES:
+        draw_text("OBJECTIVE: POWER RESTORED - ESCAPE!", 30, 30, 24, GOLD)
+    else:
+        draw_text(f"OBJECTIVE: FIND FUSES ({fuses_collected}/{TOTAL_FUSES})", 30, 30, 24, CYAN)
+
     if not is_hiding:
         def draw_threat_arrow(mx, mz, dist, base_r, base_g, base_b):
             if dist < 12.0 and not game_over and not game_won:
                 to_m_x = (mx - camera.position.x) / dist
                 to_m_z = (mz - camera.position.z) / dist
-                
                 fwd_dot = to_m_x * cam_fwd_x + to_m_z * cam_fwd_z
                 right_dot = to_m_x * cam_right_x + to_m_z * cam_right_z
-                
                 pulse = int((1.0 - (dist / 12.0)) * 220)
                 c = Color(base_r, base_g, base_b, pulse)
                 
@@ -410,7 +454,6 @@ while not window_should_close():
         draw_threat_arrow(stalker_x, stalker_z, s_dist, 100, 100, 100)
         draw_threat_arrow(dasher_x, dasher_z, d_dist, 230, 40, 40)
 
-    # End Screens
     if game_won:
         draw_rectangle(0, 0, 1500, 1000, Color(0, 0, 0, 220))
         draw_text("YOU ESCAPED THE BACKROOMS", 390, 450, 46, GOLD)
